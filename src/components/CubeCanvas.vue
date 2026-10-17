@@ -2,7 +2,7 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { RubiksCube } from '../three/RubiksCube.js'
 
-const emit = defineEmits(['moves', 'solved'])
+const emit = defineEmits(['moves', 'solved', 'busy'])
 const container = ref(null)
 let engine = null
 
@@ -10,6 +10,7 @@ onMounted(() => {
   engine = new RubiksCube(container.value, {
     onMoves: (n) => emit('moves', n),
     onSolved: () => emit('solved'),
+    onBusy: (b) => emit('busy', b),
   })
 })
 
@@ -21,6 +22,10 @@ onBeforeUnmount(() => {
 defineExpose({
   scramble: () => engine?.scramble(),
   reset: () => engine?.reset(),
+  checkSolved: () => engine?.checkSolved(),
+  getFaceletString: () => engine?.getFaceletString(),
+  performMove: (token, opts) => engine?.performMove(token, opts),
+  performSequence: (tokens, opts) => engine?.performSequence(tokens, opts),
 })
 </script>
 

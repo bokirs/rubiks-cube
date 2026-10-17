@@ -22,6 +22,42 @@ const FACE_DEFS = [
 const AXIS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]
 const AXIS_KEY = ['x', 'y', 'z']
 
+const COLOR_LETTER = new Map([
+  [0xb71234, 'R'],
+  [0xff5800, 'L'],
+  [0xf6f6f4, 'U'],
+  [0xffd500, 'D'],
+  [0x009b48, 'F'],
+  [0x0046ad, 'B'],
+])
+
+// Kociemba facelet 字符串面顺序 U R F D L B
+const FACE_BASE = { U: 0, R: 9, F: 18, D: 27, L: 36, B: 45 }
+
+// 标准记号 -> (旋转轴, 层坐标, 90°数)，顺时针 = 绕面外法线 -90°
+const MOVE_DEFS = {
+  U: { a: 1, l: 1, q: -1 }, "U'": { a: 1, l: 1, q: 1 }, U2: { a: 1, l: 1, q: -2 },
+  D: { a: 1, l: -1, q: 1 }, "D'": { a: 1, l: -1, q: -1 }, D2: { a: 1, l: -1, q: 2 },
+  R: { a: 0, l: 1, q: -1 }, "R'": { a: 0, l: 1, q: 1 }, R2: { a: 0, l: 1, q: -2 },
+  L: { a: 0, l: -1, q: 1 }, "L'": { a: 0, l: -1, q: -1 }, L2: { a: 0, l: -1, q: 2 },
+  F: { a: 2, l: 1, q: -1 }, "F'": { a: 2, l: 1, q: 1 }, F2: { a: 2, l: 1, q: -2 },
+  B: { a: 2, l: -1, q: 1 }, "B'": { a: 2, l: -1, q: -1 }, B2: { a: 2, l: -1, q: 2 },
+}
+
+export function parseMoves(str) {
+  return String(str || '').split(/\s+/).filter(Boolean)
+}
+
+export function invertMove(token) {
+  if (token.endsWith("'")) return token.slice(0, -1)
+  if (token.endsWith('2')) return token
+  return token + "'"
+}
+
+export function invertMoves(tokens) {
+  return [...tokens].reverse().map(invertMove)
+}
+
 function createStickerGeometry(size, radius) {
   const s = size / 2
   const r = Math.min(radius, s)
@@ -48,6 +84,8 @@ export class RubiksCube {
     this.mode = 'idle'          // idle | pending | layer | orbit | multi
     this.spaceHeld = false
     this.scrambling = false
+    this.playback = false       // 程序化播放/载入状态时禁用层拖动
+    this.silent = false         // 程序化转动不计步数
     this.anim = null
     this.rotating = null
     this.pendingLayer = null
@@ -199,7 +237,7 @@ export class RubiksCube {
       this.orbitLast = { x: e.clientX, y: e.clientY }
       return
     }
-    if (this.scrambling) {
+    if (this.scrambling || this.playback) {
       const hit = this.raycastAt(e.clientX, e.clientY)
       if (!hit) {
         this.mode = 'orbit'
@@ -469,16 +507,76 @@ export class RubiksCube {
     this.rotating = null
 
     if (!this.scrambling) {
-      const quarters = Math.round(target / HALF_PI)
-      const net = ((quarters % 4) + 4) % 4
-      if (net !== 0) {
-        this.moves += 1
-        this.opts.onMoves?.(this.moves)
+      if (!this.silent) {
+        const quarters = Math.round(target / HALF_PI)
+        const net = ((quarters % 4) + 4) % 4
+        if (net !== 0) {
+          this.moves += 1
+          this.opts.onMoves?.(this.moves)
+        }
       }
       const solved = this.checkSolved()
       if (solved && !this.wasSolved) this.opts.onSolved?.()
       this.wasSolved = solved
     }
+  }
+
+  // 按标准记号执行一次转动（程序化，不计步数，播放期间锁定手动转层）
+  performMove(token, opts = {}) {
+    const def = MOVE_DEFS[token]
+    if (!def) return Promise.resolve()
+    const dur = opts.duration ?? 200
+    const prevSilent = this.silent
+    this.silent = true
+    this.playback = true
+    return this.rotateLayer(def.a, def.l, def.q, dur).finally(() => {
+      this.silent = prevSilent
+      this.playback = false
+    })
+  }
+
+  async performSequence(tokens, opts = {}) {
+    for (const t of tokens) {
+      await this.performMove(t, opts)
+    }
+  }
+
+  // 导出 Kociemba facelet 字符串（U R F D L B 各 9 个，字母=贴纸所属面）
+  getFaceletString() {
+    const q = new THREE.Quaternion()
+    const v = new THREE.Vector3()
+    const out = new Array(54).fill('?')
+    for (const cubie of this.cubies) {
+      const gx = Math.round(cubie.position.x / SP)
+      const gy = Math.round(cubie.position.y / SP)
+      const gz = Math.round(cubie.position.z / SP)
+      for (const st of cubie.children) {
+        const color = st.userData.stickerColor
+        if (color === undefined) continue
+        st.getWorldQuaternion(q)
+        v.set(0, 0, 1).applyQuaternion(q)
+        const nx = Math.round(v.x)
+        const ny = Math.round(v.y)
+        const nz = Math.round(v.z)
+        const letter = COLOR_LETTER.get(color)
+        let face, idx
+        if (ny === 1) {
+          face = 'U'; idx = (gz + 1) * 3 + (gx + 1)
+        } else if (ny === -1) {
+          face = 'D'; idx = (1 - gz) * 3 + (gx + 1)
+        } else if (nz === 1) {
+          face = 'F'; idx = (1 - gy) * 3 + (gx + 1)
+        } else if (nz === -1) {
+          face = 'B'; idx = (1 - gy) * 3 + (1 - gx)
+        } else if (nx === 1) {
+          face = 'R'; idx = (1 - gy) * 3 + (1 - gz)
+        } else if (nx === -1) {
+          face = 'L'; idx = (1 - gy) * 3 + (gz + 1)
+        }
+        if (face) out[FACE_BASE[face] + idx] = letter
+      }
+    }
+    return out.join('')
   }
 
   snapCubie(c) {
@@ -517,6 +615,7 @@ export class RubiksCube {
   async scramble(count = 22) {
     if (this.scrambling) return
     this.scrambling = true
+    this.opts.onBusy?.(true)
     this.mode = 'idle'
     this.pendingLayer = null
     if (this.anim) this.finishAnimNow()
@@ -542,6 +641,7 @@ export class RubiksCube {
     }
 
     this.scrambling = false
+    this.opts.onBusy?.(false)
     this.wasSolved = this.checkSolved()
   }
 
